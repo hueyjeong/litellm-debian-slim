@@ -1,9 +1,10 @@
-# Base image for building
-ARG LITELLM_BUILD_IMAGE=cgr.dev/chainguard/python:latest-dev
+# Base image for building (Debian Slim)
+ARG LITELLM_BUILD_IMAGE=python:3.13-slim
 
-# Runtime image
-ARG LITELLM_RUNTIME_IMAGE=cgr.dev/chainguard/python:latest-dev
-# Builder stage
+# Runtime image (Debian Slim)
+ARG LITELLM_RUNTIME_IMAGE=python:3.13-slim
+
+# --- Builder stage ---
 FROM $LITELLM_BUILD_IMAGE AS builder
 
 # Set the working directory to /app
@@ -12,14 +13,24 @@ WORKDIR /app
 USER root
 
 # Install build dependencies
-RUN apk add --no-cache gcc python3-dev openssl openssl-dev
-
+# Alpine: apk add ... gcc python3-dev openssl-dev
+# Debian: apt-get ... build-essential python3-dev libssl-dev
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    libssl-dev \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --upgrade pip>=24.3.1 && \
     pip install build
 
 # Copy the current directory contents into the container at /app
 COPY . .
+
+# Fix line endings for shell scripts in builder stage
+RUN sed -i 's/\r$//' docker/build_admin_ui.sh docker/install_auto_router.sh
 
 # Build Admin UI
 RUN chmod +x docker/build_admin_ui.sh && ./docker/build_admin_ui.sh
@@ -37,8 +48,8 @@ RUN pip install dist/*.whl
 RUN pip wheel --no-cache-dir --wheel-dir=/wheels/ -r requirements.txt
 
 # ensure pyjwt is used, not jwt
-RUN pip uninstall jwt -y
-RUN pip uninstall PyJWT -y
+RUN pip uninstall jwt -y || true
+RUN pip uninstall PyJWT -y || true
 RUN pip install PyJWT==2.9.0 --no-cache-dir
 
 # Runtime stage
@@ -48,7 +59,16 @@ FROM $LITELLM_RUNTIME_IMAGE AS runtime
 USER root
 
 # Install runtime dependencies
-RUN apk add --no-cache openssl tzdata nodejs npm
+# Alpine: apk add ... openssl tzdata nodejs npm
+# Debian: apt-get ... openssl ca-certificates tzdata nodejs npm
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    openssl \
+    ca-certificates \
+    tzdata \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
 
 # Upgrade pip to fix CVE-2025-8869
 RUN pip install --upgrade pip>=24.3.1
@@ -66,8 +86,12 @@ COPY --from=builder /wheels/ /wheels/
 RUN pip install *.whl /wheels/* --no-index --find-links=/wheels/ && rm -f *.whl && rm -rf /wheels
 
 # Remove test files and keys from dependencies
-RUN find /usr/lib -type f -path "*/tornado/test/*" -delete && \
-    find /usr/lib -type d -path "*/tornado/test" -delete
+# Debian's path is /usr/local/lib/python3.13/site-packages, so scope is adjusted to /usr/local/lib
+RUN find /usr/local/lib -type f -path "*/tornado/test/*" -delete && \
+    find /usr/local/lib -type d -path "*/tornado/test" -delete
+
+# Fix line endings for shell scripts in runtime stage
+RUN sed -i 's/\r$//' docker/install_auto_router.sh docker/entrypoint.sh docker/prod_entrypoint.sh
 
 # Install semantic_router and aurelio-sdk using script
 RUN chmod +x docker/install_auto_router.sh && ./docker/install_auto_router.sh
@@ -79,7 +103,10 @@ RUN chmod +x docker/prod_entrypoint.sh
 
 EXPOSE 4000/tcp
 
-RUN apk add --no-cache supervisor
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends supervisor && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY docker/supervisord.conf /etc/supervisord.conf
 
 ENTRYPOINT ["docker/prod_entrypoint.sh"]
